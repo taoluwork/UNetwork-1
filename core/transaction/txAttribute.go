@@ -3,9 +3,8 @@ package transaction
 import (
 	"UNetwork/common/serialization"
 	. "UNetwork/errors"
-	"errors"
-	"io"
 	"bytes"
+	"io"
 )
 
 type TransactionAttributeUsage byte
@@ -46,7 +45,7 @@ func (tx *TxAttribute) Serialize(w io.Writer) error {
 		return NewDetailErr(err, ErrNoCode, "Transaction attribute Usage serialization error.")
 	}
 	if !IsValidAttributeType(tx.Usage) {
-		return NewDetailErr(errors.New("[TxAttribute] error"), ErrNoCode, "Unsupported attribute Description.")
+		return NewDetailErr(NewErr("[TxAttribute] error"), ErrNoCode, "Unsupported attribute Description.")
 	}
 	if err := serialization.WriteVarBytes(w, tx.Data); err != nil {
 		return NewDetailErr(err, ErrNoCode, "Transaction attribute Data serialization error.")
@@ -61,7 +60,7 @@ func (tx *TxAttribute) Deserialize(r io.Reader) error {
 	}
 	tx.Usage = TransactionAttributeUsage(val[0])
 	if !IsValidAttributeType(tx.Usage) {
-		return NewDetailErr(errors.New("[TxAttribute] error"), ErrNoCode, "Unsupported attribute Description.")
+		return NewDetailErr(NewErr("[TxAttribute] error"), ErrNoCode, "Unsupported attribute Description.")
 	}
 	tx.Data, err = serialization.ReadVarBytes(r)
 	if err != nil {
@@ -71,10 +70,8 @@ func (tx *TxAttribute) Deserialize(r io.Reader) error {
 
 }
 
-
-func (tx *TxAttribute) ToArray() ([]byte) {
+func (tx *TxAttribute) ToArray() []byte {
 	b := new(bytes.Buffer)
 	tx.Serialize(b)
 	return b.Bytes()
 }
-

@@ -5,7 +5,6 @@ import (
 	. "UNetwork/common"
 	"UNetwork/common/config"
 	"UNetwork/common/log"
-	con "UNetwork/consensus"
 	ct "UNetwork/core/contract"
 	"UNetwork/core/contract/program"
 	"UNetwork/core/ledger"
@@ -314,17 +313,14 @@ func (ds *DbftService) NewConsensusPayload(payload *msg.ConsensusPayload) {
 		if cv, ok := message.(*ChangeView); ok {
 			ds.ChangeViewReceived(payload, cv)
 		}
-		break
 	case PrepareRequestMsg:
 		if pr, ok := message.(*PrepareRequest); ok {
 			ds.PrepareRequestReceived(payload, pr)
 		}
-		break
 	case PrepareResponseMsg:
 		if pres, ok := message.(*PrepareResponse); ok {
 			ds.PrepareResponseReceived(payload, pres)
 		}
-		break
 	}
 }
 
@@ -472,7 +468,6 @@ func (ds *DbftService) PrepareResponseReceived(payload *msg.ConsensusPayload, me
 
 func (ds *DbftService) RefreshPolicy() {
 	log.Debug()
-	con.DefaultPolicy.Refresh()
 }
 
 func (ds *DbftService) RequestChangeView() {

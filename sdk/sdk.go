@@ -14,8 +14,6 @@ import (
 	"UNetwork/core/contract"
 	"UNetwork/core/signature"
 	"UNetwork/core/transaction"
-	"UNetwork/core/forum"
-
 )
 
 type BatchOut struct {
@@ -191,7 +189,10 @@ func MakeTransferTransaction(wallet account.Client, assetID Uint256, batchOut ..
 	}
 
 	// construct transaction inputs and changes
-	coins := wallet.GetCoins()
+	coins,err:= wallet.GetCoins()
+	if (err != nil) {
+		return nil, err
+	}
 	sorted := sortCoinsByValue(coins, account.SingleSign)
 	for _, coinItem := range sorted {
 		if coinItem.coin.Output.AssetID == assetID {
@@ -275,7 +276,10 @@ func MakeMultisigTransferTransaction(wallet account.Client, assetID Uint256, fro
 	}
 
 	// construct transaction inputs and changes
-	coins := wallet.GetCoins()
+	coins, err:= wallet.GetCoins()
+	if (err !=nil) {
+		return nil, err
+	}
 	sorted := sortCoinsByValue(coins, account.MultiSign)
 	for _, coinItem := range sorted {
 		if coinItem.coin.Output.AssetID == assetID && coinItem.coin.Output.ProgramHash == spendAddress {
@@ -358,7 +362,7 @@ func MakeRegisterUserTransaction(name string, phash Uint160) (*transaction.Trans
 	return txn, nil
 }
 
-func MakePostArticleTransaction(wallet account.Client, articleHash Uint256, author string) (*transaction.Transaction, error) {
+/*func MakePostArticleTransaction(wallet account.Client, articleHash Uint256, author string) (*transaction.Transaction, error) {
 	txn, err := transaction.NewPostArticleTrasaction(articleHash, author)
 	if err != nil {
 		return nil, err
@@ -371,9 +375,9 @@ func MakePostArticleTransaction(wallet account.Client, articleHash Uint256, auth
 	txn.SetPrograms(ctx.GetPrograms())
 
 	return txn, err
-}
+}*/
 
-func MakeLikeArticleTransaction(wallet account.Client, articleHash Uint256, me string, likeType forum.LikeType) (*transaction.Transaction, error) {
+/*func MakeLikeArticleTransaction(wallet account.Client, articleHash Uint256, me string, likeType forum.LikeType) (*transaction.Transaction, error) {
 	txn, err := transaction.NewLikeArticleTrasaction(articleHash, me, likeType)
 	if err != nil {
 		return nil, err
@@ -385,7 +389,7 @@ func MakeLikeArticleTransaction(wallet account.Client, articleHash Uint256, me s
 	txn.SetPrograms(ctx.GetPrograms())
 
 	return txn, err
-}
+}*/
 
 func MakeReplyArticleTransaction(wallet account.Client, postHash Uint256, contentHash Uint256, replier string) (*transaction.Transaction, error) {
 	txn, err := transaction.NewReplyArticleTrasaction(postHash, contentHash, replier)

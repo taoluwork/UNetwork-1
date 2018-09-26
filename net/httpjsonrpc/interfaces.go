@@ -8,13 +8,10 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strconv"
-
 	"UNetwork/account"
 	. "UNetwork/common"
 	"UNetwork/common/config"
 	"UNetwork/common/log"
-	"UNetwork/core/forum"
 	"UNetwork/core/ledger"
 	"UNetwork/core/signature"
 	tx "UNetwork/core/transaction"
@@ -27,6 +24,165 @@ import (
 const (
 	RANDBYTELEN = 4
 )
+func issueAsset(params []interface{}) map[string]interface{} {
+	if len(params) < 3 {
+		return UNetworkRPCNil
+	}
+	var asset, value, address string
+	switch params[0].(type) {
+	case string:
+		asset = params[0].(string)
+	default:
+		return UNetworkRPCInvalidParameter
+	}
+	switch params[1].(type) {
+	case string:
+		value = params[1].(string)
+	default:
+		return UNetworkRPCInvalidParameter
+	}
+	switch params[2].(type) {
+	case string:
+		address = params[2].(string)
+	default:
+		return UNetworkRPCInvalidParameter
+	}
+	if Wallet == nil {
+		return UNetworkRPC("open wallet first")
+	}
+	tmp, err := HexStringToBytesReverse(asset)
+	if err != nil {
+		return UNetworkRPC("invalid asset ID")
+	}
+	var assetID Uint256
+	if err := assetID.Deserialize(bytes.NewReader(tmp)); err != nil {
+		return UNetworkRPC("invalid asset hash")
+	}
+	issueTxn, err := sdk.MakeIssueTransaction(Wallet, assetID, address, value)
+	if err != nil {
+		return UNetworkRPCInternalError
+	}
+
+	if errCode := VerifyAndSendTx(issueTxn); errCode != ErrNoError {
+		return UNetworkRPCInvalidTransaction
+	}
+	txHash := issueTxn.Hash()
+	return UNetworkRPC(BytesToHexString(txHash.ToArrayReverse()))
+}
+
+func regAsset(params []interface{}) map[string]interface{} {
+	if len(params) < 2 {
+		return UNetworkRPCNil
+	}
+	var name, value string
+	switch params[0].(type) {
+	case string:
+		name = params[0].(string)
+	default:
+		return UNetworkRPCInvalidParameter
+	}
+	switch params[1].(type) {
+	case string:
+		value = params[1].(string)
+	default:
+		return UNetworkRPCInvalidParameter
+	}
+	if Wallet == nil {
+		return UNetworkRPC("error : wallet is not opened")
+	}
+	txn, err := sdk.MakeRegTransaction(Wallet, name, value)
+
+	if err != nil {
+		return UNetworkRPC("error: " + err.Error())
+	}
+
+	if errCode := VerifyAndSendTx(txn); errCode != ErrNoError {
+		return UNetworkRPC("error: " + errCode.Error())
+	}
+	txHash := txn.Hash()
+	return UNetworkRPC(BytesToHexString(txHash.ToArrayReverse()))
+}
+func getUtxoCoins(params []interface{}) map[string]interface{} {
+	type CoinInfo struct {
+		ReferTxID string
+		ReferTxOutputIndex uint16
+		AssetID     string
+		Value       Fixed64
+		ProgramHash string
+	}
+	var results []CoinInfo
+
+	if len(params) < 1 {
+		coins, err := Wallet.GetCoins()
+		if (err != nil) {
+			return UNetworkRPC(err.Error())
+		}
+		for k, coin := range coins {
+			ReferTxIDstr := BytesToHexString(k.ReferTxID.ToArrayReverse())
+			AssetIDstr := BytesToHexString(coin.Output.AssetID.ToArrayReverse())
+			ProgramHashstr,_:= coin.Output.ProgramHash.ToAddress()
+			results = append(results, CoinInfo{ReferTxIDstr, k.ReferTxOutputIndex,
+				AssetIDstr, coin.Output.Value, ProgramHashstr})
+		}
+	}else {
+		addr := params[0].(string)
+		var programHash Uint160
+		programHash, err := ToScriptHash(addr)
+		if err != nil {
+			return UNetworkRPC("Address Wrong!")
+		}
+		unspends, err := ledger.DefaultLedger.Store.GetUnspentOutputFromProgramHash(programHash)
+
+		for k, coin := range unspends {
+			ReferTxIDstr := BytesToHexString(k.ReferTxID.ToArrayReverse())
+			AssetIDstr := BytesToHexString(coin.AssetID.ToArrayReverse())
+			ProgramHashstr,_ := coin.ProgramHash.ToAddress()
+			results = append(results, CoinInfo{ReferTxIDstr, k.ReferTxOutputIndex,
+				AssetIDstr, coin.Value, ProgramHashstr})
+		}
+	}
+	return UNetworkRPC(results)
+}
+func getUtxoByAddr(params []interface{}) map[string]interface{} {
+	if len(params) < 1 {
+		return UNetworkRPCNil
+	}
+	addr := params[0].(string)
+
+	var programHash Uint160
+	programHash, err := ToScriptHash(addr)
+	if err != nil {
+		return UNetworkRPC("Address Wrong!")
+	}
+
+	type UTXOUnspentInfo struct {
+		Txid  string
+		Index uint32
+		Value string
+	}
+	type Result struct {
+		AssetId   string
+		AssetName string
+		Utxo      []UTXOUnspentInfo
+	}
+	var results []Result
+	unspends, err := ledger.DefaultLedger.Store.GetUnspentsFromProgramHash(programHash)
+
+	for k, u := range unspends {
+		assetid := BytesToHexString(k.ToArrayReverse())
+		asset, err := ledger.DefaultLedger.Store.GetAsset(k)
+		if err != nil {
+			return UNetworkRPC("INTERNAL_ERROR!")
+		}
+		var unspendsInfo []UTXOUnspentInfo
+		for _, v := range u {
+			unspendsInfo = append(unspendsInfo, UTXOUnspentInfo{BytesToHexString(v.Txid.ToArrayReverse()), v.Index, v.Value.String()})
+		}
+		results = append(results, Result{assetid, asset.Name, unspendsInfo})
+	}
+
+	return UNetworkRPC(results)
+}
 
 func TransArryByteToHexString(ptx *tx.Transaction) *Transactions {
 
@@ -256,7 +412,6 @@ func getRawTransaction(params []interface{}) map[string]interface{} {
 		return UNetworkRPCInvalidParameter
 	}
 }
-
 // A JSON example for sendrawtransaction method as following:
 //   {"jsonrpc": "2.0", "method": "sendrawtransaction", "params": ["raw transactioin in hex"], "id": 0}
 func sendRawTransaction(params []interface{}) map[string]interface{} {
@@ -594,9 +749,6 @@ func deleteAccount(params []interface{}) map[string]interface{} {
 	if err := Wallet.DeleteContract(programHash); err != nil {
 		return UNetworkRPC("Delete contract error:" + err.Error())
 	}
-	if err := Wallet.DeleteCoinsData(programHash); err != nil {
-		return UNetworkRPC("Delete coins error:" + err.Error())
-	}
 
 	return UNetworkRPC(true)
 }
@@ -677,6 +829,48 @@ func makeIssueTxn(params []interface{}) map[string]interface{} {
 	}
 
 	return UNetworkRPC(true)
+}
+
+func sendToAddresses(params []interface{}) map[string]interface{} {
+	type Outputinfo struct {
+		Assetid  string
+		Outputs map[string]string
+	}
+	if len(params) < 1 {
+		return UNetworkRPCNil
+	}
+	var outs Outputinfo
+	outs.Outputs = make(map[string]string)
+	mapobj := params[0].(map[string]interface{})
+	outs.Assetid = mapobj["Assetid"].(string)
+	mapouts := mapobj["Outputs"].(map[string]interface{})
+	for key, vobj := range mapouts {
+		outs.Outputs[key] = vobj.(string)
+	}
+
+	tmp, err := HexStringToBytesReverse(outs.Assetid)
+	if err != nil {
+		return UNetworkRPC("invalid asset ID")
+	}
+	var assetID Uint256
+	if err := assetID.Deserialize(bytes.NewReader(tmp)); err != nil {
+		return UNetworkRPC("invalid asset hash")
+	}
+	var batchouts []sdk.BatchOut
+	for ast, v := range outs.Outputs {
+		batchouts = append(batchouts, sdk.BatchOut{ast, v})
+	}
+
+	txn, err := sdk.MakeTransferTransaction(Wallet, assetID, batchouts...)
+	if err != nil {
+		return UNetworkRPC("error: " + err.Error())
+	}
+
+	if errCode := VerifyAndSendTx(txn); errCode != ErrNoError {
+		return UNetworkRPC("error: " + errCode.Error())
+	}
+	txHash := txn.Hash()
+	return UNetworkRPC(BytesToHexString(txHash.ToArrayReverse()))
 }
 
 func sendToAddress(params []interface{}) map[string]interface{} {
@@ -901,43 +1095,6 @@ func createMultisigTransaction(params []interface{}) map[string]interface{} {
 	}
 }
 
-func getBalance(params []interface{}) map[string]interface{} {
-	if Wallet == nil {
-		return UNetworkRPC("open wallet first")
-	}
-	type AssetInfo struct {
-		AssetID string
-		Value   string
-	}
-	balances := make(map[string][]*AssetInfo)
-	accounts := Wallet.GetAccounts()
-	coins := Wallet.GetCoins()
-	for _, account := range accounts {
-		assetList := []*AssetInfo{}
-		programHash := account.ProgramHash
-		for _, coin := range coins {
-			if programHash == coin.Output.ProgramHash {
-				var existed bool
-				assetString := BytesToHexString(coin.Output.AssetID.ToArray())
-				for _, info := range assetList {
-					if info.AssetID == assetString {
-						info.Value += coin.Output.Value.String()
-						existed = true
-						break
-					}
-				}
-				if !existed {
-					assetList = append(assetList, &AssetInfo{AssetID: assetString, Value: coin.Output.Value.String()})
-				}
-			}
-		}
-		address, _ := programHash.ToAddress()
-		balances[address] = assetList
-	}
-
-	return UNetworkRPC(balances)
-}
-
 func registerUser(params []interface{}) map[string]interface{} {
 	if len(params) < 2 {
 		return UNetworkRPCNil
@@ -955,11 +1112,8 @@ func registerUser(params []interface{}) map[string]interface{} {
 	default:
 		return UNetworkRPCInvalidParameter
 	}
-	tmp, err := HexStringToBytesReverse(userProgramHash)
-	if err != nil {
-		return UNetworkRPCInvalidParameter
-	}
-	programHash, err := Uint160ParseFromBytes(tmp)
+
+	programHash, err := ToScriptHash(userProgramHash)
 	if err != nil {
 		return UNetworkRPCInvalidParameter
 	}
@@ -976,7 +1130,7 @@ func registerUser(params []interface{}) map[string]interface{} {
 	return UNetworkRPC(BytesToHexString(hash.ToArrayReverse()))
 }
 
-func postArticle(params []interface{}) map[string]interface{} {
+/*func postArticle(params []interface{}) map[string]interface{} {
 	if len(params) < 2 {
 		return UNetworkRPCNil
 	}
@@ -1013,7 +1167,7 @@ func postArticle(params []interface{}) map[string]interface{} {
 	}
 
 	return UNetworkRPC(BytesToHexString(hash.ToArrayReverse()))
-}
+}*/
 
 func replyArticle(params []interface{}) map[string]interface{} {
 	if len(params) < 3 {
@@ -1071,7 +1225,7 @@ func replyArticle(params []interface{}) map[string]interface{} {
 	return UNetworkRPC(BytesToHexString(hash.ToArrayReverse()))
 }
 
-func likeArticle(params []interface{}) map[string]interface{} {
+/*func likeArticle(params []interface{}) map[string]interface{} {
 	if len(params) < 3 {
 		return UNetworkRPCNil
 	}
@@ -1119,7 +1273,7 @@ func likeArticle(params []interface{}) map[string]interface{} {
 	}
 
 	return UNetworkRPC(BytesToHexString(hash.ToArrayReverse()))
-}
+}*/
 
 func withdrawal(params []interface{}) map[string]interface{} {
 	if len(params) < 3 {
@@ -1180,4 +1334,40 @@ func withdrawal(params []interface{}) map[string]interface{} {
 	}
 
 	return UNetworkRPC(BytesToHexString(hash.ToArrayReverse()))
+}
+
+func getLikeArticleAdresslist(params []interface{}) map[string]interface{} {
+	if len(params) < 1 {
+		return UNetworkRPCNil
+	}
+	var ahashstr string
+	switch params[0].(type) {
+	case string:
+		ahashstr = params[0].(string)
+	default:
+		return UNetworkRPCInvalidParameter
+	}
+	ahashbt, err := HexStringToBytesReverse(ahashstr)
+	if err != nil {
+		return UNetworkRPCInvalidParameter
+	}
+	ahash256, err := Uint256ParseFromBytes(ahashbt)
+	if err != nil {
+		return UNetworkRPCInvalidParameter
+	}
+	var results []string
+	likeinfoarray,err := ledger.DefaultLedger.Store.GetLikeInfo(ahash256)
+	if (err != nil) {
+		return UNetworkRPC(err.Error())
+	}
+	for _, likeinfo := range likeinfoarray {
+		author := likeinfo.Liker
+		userinfo, err := ledger.DefaultLedger.Store.GetUserInfo(author)
+		if (err != nil) {
+			return UNetworkRPC(err.Error())
+		}
+		ProgramHashstr := BytesToHexString(userinfo.UserProgramHash.ToArrayReverse())
+		results = append(results, ProgramHashstr)
+	}
+	return UNetworkRPC(results)
 }

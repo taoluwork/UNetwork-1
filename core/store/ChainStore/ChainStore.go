@@ -2,13 +2,12 @@ package ChainStore
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"math/big"
 	"sort"
 	"sync"
 	"time"
-
+    "UNetwork/errors"
 	. "UNetwork/common"
 	"UNetwork/common/log"
 	"UNetwork/common/serialization"
@@ -24,12 +23,10 @@ import (
 	"UNetwork/core/validation"
 	"UNetwork/crypto"
 	"UNetwork/events"
-	. "UNetwork/net/httprestful/error"
 	"UNetwork/net/httpwebsocket"
 	"UNetwork/smartcontract"
 	"UNetwork/smartcontract/service"
 	"UNetwork/smartcontract/states"
-
 )
 
 const (
@@ -41,7 +38,7 @@ const (
 )
 
 var (
-	ErrDBNotFound = errors.New("leveldb: not found")
+	ErrDBNotFound = errors.NewErr("leveldb: not found")
 )
 
 type persistTask interface{}
@@ -174,7 +171,7 @@ func (bd *ChainStore) InitLedgerStoreWithGenesisBlock(genesisBlock *Block, defau
 		// GenesisBlock should exist in chain
 		// Or the bookkeepers are not consistent with the chain
 		if !bd.IsBlockInStore(hash) {
-			return 0, errors.New("bookkeepers are not consistent with the chain")
+			return 0, errors.NewErr("bookkeepers are not consistent with the chain")
 		}
 		// Get Current Block
 		currentBlockPrefix := []byte{byte(SYS_CurrentBlock)}
@@ -715,19 +712,162 @@ func (self *ChainStore) GetBookKeeperList() ([]*crypto.PubKey, []*crypto.PubKey,
 	return currBookKeeper, nextBookKeeper, nil
 }
 
-func (bd *ChainStore) persist(b *Block) error {
+func (bd *ChainStore) updateAccountState(b *Block) error {
+	accounts := make(map[Uint160]*account.AccountState, 0)
+	nLen := len(b.Transactions)
+	for i := 0; i < nLen; i++ {
+		for index := 0; index < len(b.Transactions[i].Outputs); index++ {
+			output := b.Transactions[i].Outputs[index]
+			programHash := output.ProgramHash
+			assetId := output.AssetID
+			if value, ok := accounts[programHash]; ok {
+				value.Balances[assetId] += output.Value
+			} else {
+				accountState, err := bd.GetAccount(programHash)
+				if err != nil && err.Error() != ErrDBNotFound.Error() {
+					return err
+				}
+				if accountState != nil {
+					accountState.Balances[assetId] += output.Value
+				} else {
+					balances := make(map[Uint256]Fixed64, 0)
+					balances[assetId] = output.Value
+					accountState = account.NewAccountState(programHash, balances)
+				}
+				accounts[programHash] = accountState
+			}
+		}
+
+		for index := 0; index < len(b.Transactions[i].UTXOInputs); index++ {
+			input := b.Transactions[i].UTXOInputs[index]
+			transaction, err := bd.GetTransaction(input.ReferTxID)
+			if err != nil {
+				return err
+			}
+			index := input.ReferTxOutputIndex
+			output := transaction.Outputs[index]
+			programHash := output.ProgramHash
+			assetId := output.AssetID
+			if value, ok := accounts[programHash]; ok {
+				value.Balances[assetId] -= output.Value
+			} else {
+				accountState, err := bd.GetAccount(programHash)
+				if err != nil {
+					return err
+				}
+				accountState.Balances[assetId] -= output.Value
+				accounts[programHash] = accountState
+			}
+			if accounts[programHash].Balances[assetId] < 0 {
+				return errors.NewErr(fmt.Sprintf("account programHash:%v, assetId:%v insufficient of balance", programHash, assetId))
+			}
+		}
+	}
+	for programHash, value := range accounts {
+		accountKey := new(bytes.Buffer)
+		accountKey.WriteByte(byte(ST_ACCOUNT))
+		programHash.Serialize(accountKey)
+
+		accountValue := new(bytes.Buffer)
+		value.Serialize(accountValue)
+		bd.st.BatchPut(accountKey.Bytes(), accountValue.Bytes())
+	}
+	return nil
+}
+
+func (bd *ChainStore) updateutxoUnspents(b *Block) error {
 	utxoUnspents := make(map[Uint160]map[Uint256][]*tx.UTXOUnspent)
+    var err error
+	nLen := len(b.Transactions)
+	for i := 0; i < nLen; i++ {
+		for index := 0; index < len(b.Transactions[i].Outputs); index++ {
+			output := b.Transactions[i].Outputs[index]
+			programHash := output.ProgramHash
+			assetId := output.AssetID
+
+			// add utxoUnspent
+			if _, ok := utxoUnspents[programHash]; !ok {
+				utxoUnspents[programHash] = make(map[Uint256][]*tx.UTXOUnspent)
+			}
+
+			if _, ok := utxoUnspents[programHash][assetId]; !ok {
+				utxoUnspents[programHash][assetId], err = bd.GetUnspentFromProgramHash(programHash, assetId)
+				if err != nil {
+					utxoUnspents[programHash][assetId] = make([]*tx.UTXOUnspent, 0)
+				}
+			}
+
+			unspent := new(tx.UTXOUnspent)
+			unspent.Txid = b.Transactions[i].Hash()
+			unspent.Index = uint32(index)
+			unspent.Value = output.Value
+
+			utxoUnspents[programHash][assetId] = append(utxoUnspents[programHash][assetId], unspent)
+		}
+
+		for index := 0; index < len(b.Transactions[i].UTXOInputs); index++ {
+			input := b.Transactions[i].UTXOInputs[index]
+			transaction, err := bd.GetTransaction(input.ReferTxID)
+			if err != nil {
+				return err
+			}
+			index := input.ReferTxOutputIndex
+			output := transaction.Outputs[index]
+			programHash := output.ProgramHash
+			assetId := output.AssetID
+
+			// delete utxoUnspent
+			if _, ok := utxoUnspents[programHash]; !ok {
+				utxoUnspents[programHash] = make(map[Uint256][]*tx.UTXOUnspent)
+			}
+
+			if _, ok := utxoUnspents[programHash][assetId]; !ok {
+				utxoUnspents[programHash][assetId], err = bd.GetUnspentFromProgramHash(programHash, assetId)
+				if err != nil {
+					return errors.NewErr(fmt.Sprintf("[persist] utxoUnspents programHash:%v, assetId:%v has no unspent UTXO.", programHash, assetId))
+				}
+			}
+
+			flag := false
+			listnum := len(utxoUnspents[programHash][assetId])
+			for i := 0; i < listnum; i++ {
+				if utxoUnspents[programHash][assetId][i].Txid.CompareTo(transaction.Hash()) == 0 && utxoUnspents[programHash][assetId][i].Index == uint32(index) {
+					utxoUnspents[programHash][assetId][i] = utxoUnspents[programHash][assetId][listnum-1]
+					utxoUnspents[programHash][assetId] = utxoUnspents[programHash][assetId][:listnum-1]
+
+					flag = true
+					break
+				}
+			}
+
+			if !flag {
+				return errors.NewErr(fmt.Sprintf("[persist] utxoUnspents NOT find UTXO by txid: %x, index: %d.", transaction.Hash(), index))
+			}
+
+		}
+	}
+	// batch put the utxoUnspents
+	for programHash, programHash_value := range utxoUnspents {
+		for assetId, unspents := range programHash_value {
+			err := bd.saveUnspentWithProgramHash(programHash, assetId, unspents)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func (bd *ChainStore) persist(b *Block) error {
 	unspents := make(map[Uint256][]uint16)
 	quantities := make(map[Uint256]Fixed64)
 	dbCache := NewDBCache(bd)
 	lockedAssets := make(map[Uint160]map[Uint256][]*LockAsset)
-	articleInfo := make(map[string][]*forum.ArticleInfo)
-	likeInfo := make(map[Uint256][]*forum.LikeInfo)
+	articleInfo := make(map[string][]*payload.ArticleInfo)
+	likeInfo := make(map[Uint256][]*payload.LikeArticle)
 
 	///////////////////////////////////////////////////////////////
 	// Get Unspents for every tx
 	unspentPrefix := []byte{byte(IX_Unspent)}
-	accounts := make(map[Uint160]*account.AccountState, 0)
 
 	///////////////////////////////////////////////////////////////
 	// batch write begin
@@ -815,39 +955,28 @@ func (bd *ChainStore) persist(b *Block) error {
 				return err
 			}
 		case tx.RegisterUser:
-			payload := b.Transactions[i].Payload.(*payload.RegisterUser)
-			userInfo := &forum.UserInfo{
-				UserProgramHash: payload.UserProgramHash,
-				Reputation:      payload.Reputation,
-			}
-			err = bd.SaveUserInfo(payload.UserName, userInfo)
+			userInfo := b.Transactions[i].Payload.(*payload.RegisterUser)
+
+			err = bd.SaveUserInfo(userInfo)
 			if err != nil {
 				return err
 			}
 		case tx.PostArticle:
-			author := b.Transactions[i].Payload.(*payload.PostArticle).Author
-			tmp := &forum.ArticleInfo{
-				ContentHash: b.Transactions[i].Payload.(*payload.PostArticle).ContentHash,
-				ContentType: forum.Post,
-			}
+			author := b.Transactions[i].Payload.(*payload.ArticleInfo).Author
+			tmp := b.Transactions[i].Payload.(*payload.ArticleInfo)
 			articleInfo[author] = append(articleInfo[author], tmp)
 		case tx.LikeArticle:
-			hash := b.Transactions[i].Payload.(*payload.LikeArticle).PostTxnHash
-			liker := b.Transactions[i].Payload.(*payload.LikeArticle).Liker
-			liketype := b.Transactions[i].Payload.(*payload.LikeArticle).LikeType
-			tmp := &forum.LikeInfo{
-				Liker:    liker,
-				LikeType: liketype,
-			}
+			hash := b.Transactions[i].Payload.(*payload.LikeArticle).Articlehash
+			tmp := b.Transactions[i].Payload.(*payload.LikeArticle)
 			likeInfo[hash] = append(likeInfo[hash], tmp)
-		case tx.ReplyArticle:
+		/*case tx.ReplyArticle:
 			replier := b.Transactions[i].Payload.(*payload.ReplyArticle).Replier
 			tmp := &forum.ArticleInfo{
 				ParentTxnHash: b.Transactions[i].Payload.(*payload.ReplyArticle).PostHash,
 				ContentHash:   b.Transactions[i].Payload.(*payload.ReplyArticle).ContentHash,
 				ContentType:   forum.Reply,
 			}
-			articleInfo[replier] = append(articleInfo[replier], tmp)
+			articleInfo[replier] = append(articleInfo[replier], tmp)*/
 		case tx.Withdrawal:
 			payee := b.Transactions[i].Payload.(*payload.Withdrawal).Payee
 			info := &forum.TokenInfo{
@@ -910,19 +1039,19 @@ func (bd *ChainStore) persist(b *Block) error {
 			})
 
 			if err != nil {
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, DEPLOY_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, DEPLOY_TRANSACTION, err)
 				return err
 			}
 
 			ret, err := smartContract.DeployContract()
 			if err != nil {
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, DEPLOY_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, DEPLOY_TRANSACTION, err)
 				continue
 			}
 
 			hash, err := ToCodeHash(ret)
 			if err != nil {
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, DEPLOY_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, DEPLOY_TRANSACTION, err)
 				return err
 			}
 
@@ -936,13 +1065,13 @@ func (bd *ChainStore) persist(b *Block) error {
 			contract, err := bd.GetContract(invokeCode.CodeHash)
 			if err != nil {
 				log.Error("db getcontract err:", err)
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
 				continue
 			}
 			state, err := states.GetStateValue(ST_Contract, contract)
 			if err != nil {
 				log.Error("states GetStateValue err:", err)
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
 				return err
 			}
 			contractState := state.(*states.ContractState)
@@ -964,111 +1093,17 @@ func (bd *ChainStore) persist(b *Block) error {
 			})
 			if err != nil {
 				log.Error("smartcontract NewSmartContract err:", err)
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
 				continue
 			}
 			ret, err := smartContract.InvokeContract()
 			if err != nil {
 				log.Error("smartContract InvokeContract err:", err)
-				httpwebsocket.PushResult(txHash, SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
+				httpwebsocket.PushResult(txHash, errors.SMARTCODE_ERROR, INVOKE_TRANSACTION, err)
 				continue
 			}
 			stateMachine.CloneCache.Commit()
 			httpwebsocket.PushResult(txHash, 0, INVOKE_TRANSACTION, ret)
-		}
-		for index := 0; index < len(b.Transactions[i].Outputs); index++ {
-			output := b.Transactions[i].Outputs[index]
-			programHash := output.ProgramHash
-			assetId := output.AssetID
-			if value, ok := accounts[programHash]; ok {
-				value.Balances[assetId] += output.Value
-			} else {
-				accountState, err := bd.GetAccount(programHash)
-				if err != nil && err.Error() != ErrDBNotFound.Error() {
-					return err
-				}
-				if accountState != nil {
-					accountState.Balances[assetId] += output.Value
-				} else {
-					balances := make(map[Uint256]Fixed64, 0)
-					balances[assetId] = output.Value
-					accountState = account.NewAccountState(programHash, balances)
-				}
-				accounts[programHash] = accountState
-			}
-
-			// add utxoUnspent
-			if _, ok := utxoUnspents[programHash]; !ok {
-				utxoUnspents[programHash] = make(map[Uint256][]*tx.UTXOUnspent)
-			}
-
-			if _, ok := utxoUnspents[programHash][assetId]; !ok {
-				utxoUnspents[programHash][assetId], err = bd.GetUnspentFromProgramHash(programHash, assetId)
-				if err != nil {
-					utxoUnspents[programHash][assetId] = make([]*tx.UTXOUnspent, 0)
-				}
-			}
-
-			unspent := new(tx.UTXOUnspent)
-			unspent.Txid = b.Transactions[i].Hash()
-			unspent.Index = uint32(index)
-			unspent.Value = output.Value
-
-			utxoUnspents[programHash][assetId] = append(utxoUnspents[programHash][assetId], unspent)
-		}
-
-		for index := 0; index < len(b.Transactions[i].UTXOInputs); index++ {
-			input := b.Transactions[i].UTXOInputs[index]
-			transaction, err := bd.GetTransaction(input.ReferTxID)
-			if err != nil {
-				return err
-			}
-			index := input.ReferTxOutputIndex
-			output := transaction.Outputs[index]
-			programHash := output.ProgramHash
-			assetId := output.AssetID
-			if value, ok := accounts[programHash]; ok {
-				value.Balances[assetId] -= output.Value
-			} else {
-				accountState, err := bd.GetAccount(programHash)
-				if err != nil {
-					return err
-				}
-				accountState.Balances[assetId] -= output.Value
-				accounts[programHash] = accountState
-			}
-			if accounts[programHash].Balances[assetId] < 0 {
-				return errors.New(fmt.Sprintf("account programHash:%v, assetId:%v insufficient of balance", programHash, assetId))
-			}
-
-			// delete utxoUnspent
-			if _, ok := utxoUnspents[programHash]; !ok {
-				utxoUnspents[programHash] = make(map[Uint256][]*tx.UTXOUnspent)
-			}
-
-			if _, ok := utxoUnspents[programHash][assetId]; !ok {
-				utxoUnspents[programHash][assetId], err = bd.GetUnspentFromProgramHash(programHash, assetId)
-				if err != nil {
-					return errors.New(fmt.Sprintf("[persist] utxoUnspents programHash:%v, assetId:%v has no unspent UTXO.", programHash, assetId))
-				}
-			}
-
-			flag := false
-			listnum := len(utxoUnspents[programHash][assetId])
-			for i := 0; i < listnum; i++ {
-				if utxoUnspents[programHash][assetId][i].Txid.CompareTo(transaction.Hash()) == 0 && utxoUnspents[programHash][assetId][i].Index == uint32(index) {
-					utxoUnspents[programHash][assetId][i] = utxoUnspents[programHash][assetId][listnum-1]
-					utxoUnspents[programHash][assetId] = utxoUnspents[programHash][assetId][:listnum-1]
-
-					flag = true
-					break
-				}
-			}
-
-			if !flag {
-				return errors.New(fmt.Sprintf("[persist] utxoUnspents NOT find UTXO by txid: %x, index: %d.", transaction.Hash(), index))
-			}
-
 		}
 
 		// init unspent in tx
@@ -1144,7 +1179,12 @@ func (bd *ChainStore) persist(b *Block) error {
 		}
 
 	}
-
+	if err = bd.updateutxoUnspents(b); err != nil {
+		return err
+	}
+	if err = bd.updateAccountState(b); err != nil {
+		return err
+	}
 	if needUpdateBookKeeper {
 		//bookKeeper key
 		bkListKey := bytes.NewBuffer(nil)
@@ -1171,15 +1211,6 @@ func (bd *ChainStore) persist(b *Block) error {
 	///////////////////////////////////////////////////////
 	//*/
 
-	// batch put the utxoUnspents
-	for programHash, programHash_value := range utxoUnspents {
-		for assetId, unspents := range programHash_value {
-			err := bd.saveUnspentWithProgramHash(programHash, assetId, unspents)
-			if err != nil {
-				return err
-			}
-		}
-	}
 
 	// batch put the unspents
 	for txhash, value := range unspents {
@@ -1216,16 +1247,6 @@ func (bd *ChainStore) persist(b *Block) error {
 		log.Debug(fmt.Sprintf("quantityArray: %x\n", quantityArray.Bytes()))
 	}
 
-	for programHash, value := range accounts {
-		accountKey := new(bytes.Buffer)
-		accountKey.WriteByte(byte(ST_ACCOUNT))
-		programHash.Serialize(accountKey)
-
-		accountValue := new(bytes.Buffer)
-		value.Serialize(accountValue)
-
-		bd.st.BatchPut(accountKey.Bytes(), accountValue.Bytes())
-	}
 
 	for programHash, assets := range lockedAssets {
 		for assetID, locked := range assets {
@@ -1242,7 +1263,7 @@ func (bd *ChainStore) persist(b *Block) error {
 	}
 
 	userTokenInfo := make(map[string]*forum.TokenInfo)
-	userReputationInfo := make(map[string]*forum.UserInfo)
+	userReputationInfo := make(map[string]*payload.RegisterUser)
 	for postTxnHash, liker := range likeInfo {
 		// update like info for each post/reply transaction
 		if err := bd.UpdateLikeInfo(postTxnHash, liker); err != nil {
@@ -1250,11 +1271,11 @@ func (bd *ChainStore) persist(b *Block) error {
 		}
 
 		// get author of each post/reply transaction
-		txn, err := bd.GetTransaction(postTxnHash)
+		artinfo,err := bd.GetArticleInfo(postTxnHash)
 		if err != nil {
 			return err
 		}
-		author := txn.Payload.(*payload.PostArticle).Author
+		author := artinfo.Author
 
 		if _, ok := userTokenInfo[author]; !ok {
 			existedTokenInfo, err := bd.GetTokenInfo(author, forum.TotalToken)
@@ -1277,11 +1298,11 @@ func (bd *ChainStore) persist(b *Block) error {
 			if err != nil {
 				return err
 			}
-			switch l.LikeType {
-			case forum.LikePost:
+			switch l.Liketype() {
+			case payload.LikePost:
 				userTokenInfo[author].Number += userInfo.Reputation / 1000
 				userReputationInfo[author].Reputation += userInfo.Reputation / 1000
-			case forum.DislikePost:
+			case payload.DislikePost:
 				userReputationInfo[author].Reputation -= userInfo.Reputation / 1000
 			}
 		}
@@ -1291,11 +1312,11 @@ func (bd *ChainStore) persist(b *Block) error {
 			return err
 		}
 	}
-	for user, reputationInfo := range userReputationInfo {
+	for _, reputationInfo := range userReputationInfo {
 		if reputationInfo.Reputation <= Fixed64(100000000) {
 			reputationInfo.Reputation = 100000000
 		}
-		if err := bd.SaveUserInfo(user, reputationInfo); err != nil {
+		if err := bd.SaveUserInfo(reputationInfo); err != nil {
 			return err
 		}
 	}
@@ -1499,7 +1520,7 @@ func (bd *ChainStore) GetUnspent(txid Uint256, index uint16) (*tx.TxOutput, erro
 		return Tx.Outputs[index], nil
 	}
 
-	return nil, errors.New("[GetUnspent] NOT ContainsUnspent.")
+	return nil, errors.NewErr("[GetUnspent] NOT ContainsUnspent.")
 }
 
 func (bd *ChainStore) ContainsUnspent(txid Uint256, index uint16) (bool, error) {
@@ -1746,6 +1767,33 @@ func (bd *ChainStore) GetUnspentsFromProgramHash(programHash Uint160) (map[Uint2
 	return uxtoUnspents, nil
 }
 
+func (bd *ChainStore) GetUnspentOutputFromProgramHash(programHash Uint160) (map[*tx.UTXOTxInput]*tx.TxOutput, error) {
+	unspends, err := bd.GetUnspentsFromProgramHash(programHash)
+	if err != nil {
+		return nil,  err
+	}
+	results := make(map[*tx.UTXOTxInput]*tx.TxOutput)
+	for _, u := range unspends {
+		for _, v := range u {
+			input := new(tx.UTXOTxInput)
+			input.ReferTxID = v.Txid
+			input.ReferTxOutputIndex = uint16(v.Index)
+
+			txn, err := bd.GetTransaction(v.Txid)
+			if err != nil {
+				return nil, err
+			}
+			output := new(tx.TxOutput)
+			output.AssetID = txn.Outputs[v.Index].AssetID
+			output.ProgramHash = txn.Outputs[v.Index].ProgramHash
+			output.Value = txn.Outputs[v.Index].Value
+			results[input] = output
+
+		}
+	}
+	return results, nil
+}
+
 func (bd *ChainStore) GetAssets() map[Uint256]*Asset {
 	assets := make(map[Uint256]*Asset)
 
@@ -1779,7 +1827,7 @@ func (bd *ChainStore) GetStorage(key []byte) ([]byte, error) {
 	return bData, nil
 }
 
-func (db *ChainStore) GetUserInfo(name string) (*forum.UserInfo, error) {
+func (db *ChainStore) GetUserInfo(name string) (*payload.RegisterUser, error) {
 	key := bytes.NewBuffer(nil)
 	key.WriteByte(byte(ST_User))
 	key.WriteString(name)
@@ -1790,21 +1838,21 @@ func (db *ChainStore) GetUserInfo(name string) (*forum.UserInfo, error) {
 	}
 
 	r := bytes.NewReader(rawUserInfo)
-	var userInfo forum.UserInfo
-	if err := userInfo.Deserialization(r); err != nil {
+	var userInfo payload.RegisterUser
+	if err := userInfo.Deserialize(r, 0); err != nil {
 		return nil, err
 	}
 
 	return &userInfo, nil
 }
 
-func (bd *ChainStore) SaveUserInfo(name string, userInfo *forum.UserInfo) error {
+func (bd *ChainStore) SaveUserInfo(userInfo *payload.RegisterUser) error {
 	key := bytes.NewBuffer(nil)
 	key.WriteByte(byte(ST_User))
-	key.WriteString(name)
+	key.WriteString(userInfo.UserName)
 
 	value := bytes.NewBuffer(nil)
-	if err := userInfo.Serialization(value); err != nil {
+	if err := userInfo.Serialize(value, 0); err != nil {
 		return err
 	}
 
@@ -1815,7 +1863,8 @@ func (bd *ChainStore) SaveUserInfo(name string, userInfo *forum.UserInfo) error 
 	return nil
 }
 
-func (db *ChainStore) GetUserArticleInfo(author string) ([]*forum.ArticleInfo, error) {
+//get user's article hash array
+func (db *ChainStore) GetUserArticleInfo(author string) ([]Uint256, error) {
 	key := bytes.NewBuffer(nil)
 	key.WriteByte(byte(ST_Post))
 	key.WriteString(author)
@@ -1825,62 +1874,87 @@ func (db *ChainStore) GetUserArticleInfo(author string) ([]*forum.ArticleInfo, e
 		return nil, nil
 	}
 	buf := bytes.NewBuffer(existed)
-	num, err := serialization.ReadVarUint(buf, 0)
+	num, err := serialization.ReadUint32(buf)
 	if err != nil {
 		return nil, err
 	}
-	info := make([]*forum.ArticleInfo, num)
-	for i := range info {
-		info[i] = new(forum.ArticleInfo)
-		if err := info[i].Deserialization(buf); err != nil {
+	result := make([]Uint256, num)
+	for i := range result {
+		if err := result[i].Deserialize(buf); err != nil {
 			return nil, err
 		}
 	}
 
-	return info, nil
+	return result, nil
 }
 
-func (db *ChainStore) SaveUserArticleInfo(author string, postInfo []*forum.ArticleInfo) error {
+func (db *ChainStore) GetArticleInfo(articlehash Uint256) (payload.ArticleInfo, error) {
+	key := bytes.NewBuffer(nil)
+	key.WriteByte(byte(ST_Article))
+    articlehash.Serialize(key)
+
+	valuebuffer, _ := db.st.Get(key.Bytes())
+	buf := bytes.NewBuffer(valuebuffer)
+	var artinfo payload.ArticleInfo
+	err := artinfo.Deserialize(buf, 0)
+	return artinfo, err
+}
+
+func (db *ChainStore) SaveArticleInfo(postInfo *payload.ArticleInfo) error {
+	key := bytes.NewBuffer(nil)
+	key.WriteByte(byte(ST_Article))
+	postInfo.Articlehash.Serialize(key)
+
+	value := bytes.NewBuffer(nil)
+	if err := postInfo.Serialize(value, 0); err != nil {
+		return err
+	}
+	if err := db.st.BatchPut(key.Bytes(), value.Bytes()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (db *ChainStore) SaveUserArticleInfo(author string, postInfo []Uint256) error {
 	key := bytes.NewBuffer(nil)
 	key.WriteByte(byte(ST_Post))
 	key.WriteString(author)
 
 	value := bytes.NewBuffer(nil)
-	if err := serialization.WriteVarUint(value, uint64(len(postInfo))); err != nil {
-		return err
-	}
+	serialization.WriteUint32(value, uint32(len(postInfo)))
 	for _, info := range postInfo {
-		if err := info.Serialization(value); err != nil {
+		if _, err := info.Serialize(value); err != nil {
 			return err
 		}
-	}
 
+	}
 	if err := db.st.BatchPut(key.Bytes(), value.Bytes()); err != nil {
 		return err
 	}
-
 	return nil
 }
 
-func (db *ChainStore) UpdateUserArticleInfo(author string, postInfo []*forum.ArticleInfo) error {
+func (db *ChainStore) UpdateUserArticleInfo(author string, postInfo []*payload.ArticleInfo) error {
 	existed, err := db.GetUserArticleInfo(author)
 	if err != nil {
 		return err
 	}
-	var updated []*forum.ArticleInfo
+	var updated []Uint256
+	for _, info := range postInfo {
+		db.SaveArticleInfo(info)
+		updated = append(updated, info.Articlehash)
+	}
 	updated = append(updated, existed...)
-	updated = append(updated, postInfo...)
 	if err := db.SaveUserArticleInfo(author, updated); err != nil {
 		return err
 	}
-
 	return nil
 }
 
-func (db *ChainStore) GetLikeInfo(postTxnHash Uint256) ([]*forum.LikeInfo, error) {
+func (db *ChainStore) GetLikeInfo(articlehash Uint256) ([]*payload.LikeArticle, error) {
 	key := bytes.NewBuffer(nil)
 	key.WriteByte(byte(ST_Like))
-	postTxnHash.Serialize(key)
+	articlehash.Serialize(key)
 
 	existed, _ := db.st.Get(key.Bytes())
 	if len(existed) == 0 {
@@ -1891,10 +1965,10 @@ func (db *ChainStore) GetLikeInfo(postTxnHash Uint256) ([]*forum.LikeInfo, error
 	if err != nil {
 		return nil, err
 	}
-	info := make([]*forum.LikeInfo, num)
+	info := make([]*payload.LikeArticle, num)
 	for i := range info {
-		info[i] = new(forum.LikeInfo)
-		if err := info[i].Deserialization(buf); err != nil {
+		info[i] = new(payload.LikeArticle)
+		if err := info[i].Deserialize(buf, 0); err != nil {
 			return nil, err
 		}
 	}
@@ -1902,17 +1976,17 @@ func (db *ChainStore) GetLikeInfo(postTxnHash Uint256) ([]*forum.LikeInfo, error
 	return info, nil
 }
 
-func (db *ChainStore) SaveLikeInfo(postTxnHash Uint256, likeInfo []*forum.LikeInfo) error {
+func (db *ChainStore) SaveLikeInfo(articlehash Uint256, likeInfo []*payload.LikeArticle) error {
 	key := bytes.NewBuffer(nil)
 	key.WriteByte(byte(ST_Like))
-	postTxnHash.Serialize(key)
+	articlehash.Serialize(key)
 
 	value := bytes.NewBuffer(nil)
 	if err := serialization.WriteVarUint(value, uint64(len(likeInfo))); err != nil {
 		return err
 	}
 	for _, info := range likeInfo {
-		if err := info.Serialization(value); err != nil {
+		if err := info.Serialize(value, 0); err != nil {
 			return err
 		}
 	}
@@ -1924,15 +1998,15 @@ func (db *ChainStore) SaveLikeInfo(postTxnHash Uint256, likeInfo []*forum.LikeIn
 	return nil
 }
 
-func (db *ChainStore) UpdateLikeInfo(postTxnHash Uint256, likeInfo []*forum.LikeInfo) error {
-	existed, err := db.GetLikeInfo(postTxnHash)
+func (db *ChainStore) UpdateLikeInfo(articlehash Uint256, likeInfo []*payload.LikeArticle) error {
+	existed, err := db.GetLikeInfo(articlehash)
 	if err != nil {
 		return err
 	}
-	var updated []*forum.LikeInfo
+	var updated []*payload.LikeArticle
 	updated = append(updated, existed...)
 	updated = append(updated, likeInfo...)
-	if err := db.SaveLikeInfo(postTxnHash, updated); err != nil {
+	if err := db.SaveLikeInfo(articlehash, updated); err != nil {
 		return err
 	}
 

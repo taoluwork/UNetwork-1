@@ -1,7 +1,6 @@
 package ledger
 
 import (
-
 	. "UNetwork/common"
 	"UNetwork/core/account"
 	. "UNetwork/core/asset"
@@ -9,7 +8,7 @@ import (
 	tx "UNetwork/core/transaction"
 	"UNetwork/crypto"
 	"UNetwork/smartcontract/states"
-
+	"UNetwork/core/transaction/payload"
 )
 
 // ILedgerStore provides func with store package.
@@ -36,9 +35,10 @@ type ILedgerStore interface {
 	GetAccount(programHash Uint160) (*account.AccountState, error)
 	GetAssetState(assetId Uint256) (*states.AssetState, error)
 
-	GetUserInfo(name string) (*forum.UserInfo, error)
-	GetLikeInfo(postHash Uint256) ([]*forum.LikeInfo, error)
-	GetUserArticleInfo(name string) ([]*forum.ArticleInfo, error)
+	GetUserInfo(name string) (*payload.RegisterUser, error)
+	GetLikeInfo(articlehash Uint256) ([]*payload.LikeArticle, error)
+	GetArticleInfo(articlehash Uint256) (payload.ArticleInfo, error)
+	GetUserArticleInfo(name string) ([]Uint256, error)
 	GetTokenInfo(name string, tokenType forum.TokenType) (*forum.TokenInfo, error)
 	GetAvailableTokenInfo(name string) (*forum.TokenInfo, error)
 
@@ -57,6 +57,7 @@ type ILedgerStore interface {
 	ContainsUnspent(txid Uint256, index uint16) (bool, error)
 	GetUnspentFromProgramHash(programHash Uint160, assetid Uint256) ([]*tx.UTXOUnspent, error)
 	GetUnspentsFromProgramHash(programHash Uint160) (map[Uint256][]*tx.UTXOUnspent, error)
+	GetUnspentOutputFromProgramHash(programHash Uint160) (map[*tx.UTXOTxInput]*tx.TxOutput, error)
 	GetLockedFromProgramHash(programHash Uint160, assetid Uint256) ([]*LockAsset, error)
 	GetAvailableAsset(programHash Uint160, assetid Uint256) (Fixed64, Fixed64, error)
 	GetAssets() map[Uint256]*Asset

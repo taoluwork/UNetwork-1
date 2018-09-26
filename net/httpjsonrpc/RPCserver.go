@@ -1,7 +1,7 @@
 package httpjsonrpc
 
 import (
-	. "UNetwork/common/config"
+	."UNetwork/common/config"
 	"UNetwork/common/log"
 	"net/http"
 	"strconv"
@@ -13,7 +13,7 @@ const (
 
 const (
 	RPCGetBestBlockHash          = "getbestblockhash"
-	RPCGetBlock                  = "getblock" 
+	RPCGetBlock                  = "getblock"
 	RPCGetBlockCount             = "getblockcount"
 	RPCGetBlockHash              = "getblockhash"
 	RPCGetConnectionCount        = "getconnectioncount"
@@ -34,6 +34,12 @@ const (
 	RPCReplyArticle = "replyarticle"
 	RPCLikeArticle  = "likearticle"
 	RPCWithdrawl    = "withdrawal"
+	RPCGetUTXOByAddr    = "getutxobyaddr"
+	RPCGetUtxoCoins  = "getutxocoins"
+	RPCGetLikeArticleAdresslist ="getlikearticleadresslist"
+	RPCRegAsset  = "regasset"
+	RPCIssueAsset  = "issueasset"
+	RPCSendToAddresses            = "sendtoaddresses"
 )
 
 func StartRPCServer() {
@@ -63,10 +69,16 @@ func StartRPCServer() {
 	// sendrawtrasaction interface of restfull interface.
 	// Put them here only for forum feature testing.
 	HandleFunc(RPCRegisterUser, registerUser)
-	HandleFunc(RPCPostarticle, postArticle)
+	//HandleFunc(RPCPostarticle, postArticle)
 	HandleFunc(RPCReplyArticle, replyArticle)
-	HandleFunc(RPCLikeArticle, likeArticle)
+	//HandleFunc(RPCLikeArticle, likeArticle)
 	HandleFunc(RPCWithdrawl, withdrawal)
+	HandleFunc(RPCGetUTXOByAddr, getUtxoByAddr)
+	HandleFunc(RPCGetUtxoCoins, getUtxoCoins)
+	HandleFunc(RPCGetLikeArticleAdresslist, getLikeArticleAdresslist)
+	HandleFunc(RPCRegAsset, regAsset)
+	HandleFunc(RPCIssueAsset, issueAsset)
+	HandleFunc(RPCSendToAddresses, sendToAddresses)
 
 	err := http.ListenAndServe(LocalHost+":"+strconv.Itoa(Parameters.HttpJsonPort), nil)
 	if err != nil {

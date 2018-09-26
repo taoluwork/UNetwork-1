@@ -4,10 +4,9 @@ import (
 	. "UNetwork/common"
 	"UNetwork/common/serialization"
 	. "UNetwork/errors"
-	"bytes"
-	"errors"
-	"io"
 	"UNetwork/vm/avm"
+	"bytes"
+	"io"
 )
 
 //Contract address is the hash of contract program .
@@ -60,16 +59,16 @@ func (c *Contract) IsMultiSigContract() bool {
 		i++
 		m = int16(c.Code[i])
 		i++
-		break
+
 	case 2:
 		i++
 		m = BytesToInt16(c.Code[i:])
 		i += 2
-		break
+
 	default:
 		m = int16(c.Code[i]) - 80
 		i++
-		break
+
 	}
 
 	if m < 1 || m > 1024 {
@@ -94,20 +93,20 @@ func (c *Contract) IsMultiSigContract() bool {
 			return false
 		}
 		i++
-		break
+
 	case 2:
 		i++
 		if n != BytesToInt16(c.Code[i:]) {
 			return false
 		}
 		i += 2
-		break
+
 	default:
 		if n != (int16(c.Code[i]) - 80) {
 			return false
 		}
 		i++
-		break
+
 	}
 
 	if c.Code[i] != byte(avm.CHECKMULTISIG) {
@@ -154,7 +153,7 @@ func (c *Contract) Serialize(w io.Writer) error {
 		return err
 	}
 	if len != 20 {
-		return NewDetailErr(errors.New("PubkeyHash.Serialize(): len != len(Uint160)"), ErrNoCode, "")
+		return NewDetailErr(NewErr("PubkeyHash.Serialize(): len != len(Uint160)"), ErrNoCode, "")
 	}
 
 	err = serialization.WriteVarBytes(w, ContractParameterTypeToByte(c.Parameters))

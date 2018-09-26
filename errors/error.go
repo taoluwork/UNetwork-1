@@ -1,6 +1,4 @@
-package error
-
-import . "UNetwork/errors"
+package errors
 
 const (
 	SUCCESS            int64 = 0
@@ -40,7 +38,7 @@ var ErrMap = map[int64]string{
 	INVALID_METHOD: "INVALID METHOD",
 	INVALID_PARAMS: "INVALID PARAMS",
 	INVALID_TOKEN:  "VERIFY TOKEN ERROR",
-	INVALID_USER:  "INVALID USER",
+	INVALID_USER:   "INVALID USER",
 
 	INVALID_TRANSACTION: "INVALID TRANSACTION",
 	INVALID_ASSET:       "INVALID ASSET",
@@ -67,3 +65,7 @@ var ErrMap = map[int64]string{
 	int64(ErrDuplicateCharacter):   "INTERNAL ERROR, ErrDuplicateCharacter",
 	int64(ErrXmitFail):             "INTERNAL ERROR, ErrXmitFail",
 }
+// Define common error process and const
+const (
+	HANDSHARKFAIL = -1
+)

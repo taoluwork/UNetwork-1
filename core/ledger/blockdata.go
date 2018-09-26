@@ -6,10 +6,9 @@ import (
 	"UNetwork/core/contract/program"
 	sig "UNetwork/core/signature"
 	. "UNetwork/errors"
-	"crypto/sha256"
-	"errors"
-	"io"
 	"bytes"
+	"crypto/sha256"
+	"io"
 )
 
 type Blockdata struct {
@@ -56,10 +55,10 @@ func (bd *Blockdata) Deserialize(r io.Reader) error {
 		x := []byte(p[:])
 
 		if x[0] != byte(1) {
-			return NewDetailErr(errors.New("Blockdata Deserialize get format error."), ErrNoCode, "")
+			return NewDetailErr(NewErr("Blockdata Deserialize get format error."), ErrNoCode, "")
 		}
 	} else {
-		return NewDetailErr(errors.New("Blockdata Deserialize get format error."), ErrNoCode, "")
+		return NewDetailErr(NewErr("Blockdata Deserialize get format error."), ErrNoCode, "")
 	}
 
 	pg := new(program.Program)
@@ -159,7 +158,7 @@ func (bd *Blockdata) GetMessage() []byte {
 	return sig.GetHashData(bd)
 }
 
-func (bd *Blockdata) ToArray() ([]byte) {
+func (bd *Blockdata) ToArray() []byte {
 	b := new(bytes.Buffer)
 	bd.Serialize(b)
 	return b.Bytes()
